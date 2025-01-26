@@ -4,6 +4,7 @@
 #include "display.h"
 #include "can.h"
 #include "config.h"
+#include <ESP32Encoder.h>
 
 TaskHandle_t displayTask;
 TaskHandle_t canTask;
@@ -12,58 +13,78 @@ TaskHandle_t canTask;
 Arduino_ESP32SPI *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, TFT_MISO);
 Arduino_GC9A01 display = Arduino_GC9A01(bus, TFT_RES, 0 /* rotation */, true /* IPS */);
 
+ESP32Encoder encoder;
+volatile int encoderValue = 0;
 
 void setup() {
-  Serial.begin(115200);
+    Serial.begin(115200);
 
-  // Initialize PSRAM if available
-  if(!psramInit()) {
-    Serial.println("PSRAM not available");
-  } else {
-    Serial.println("PSRAM initialized");
-  }
+    // Initialize PSRAM first
+    if(!psramInit()) {
+        Serial.println("PSRAM not available");
+    } else {
+        Serial.println("PSRAM initialized");
+    }
 
-  // Initialize display with faster speed
-  if (!display.begin(40000000)) { // Try 40MHz
-    Serial.println("Display initialization failed!");
-    while (1) delay(5);
-  }
+    // Create semaphore before using it
+    displayMutex = xSemaphoreCreateMutex();
+    if (displayMutex == NULL) {
+        Serial.println("Failed to create display mutex!");
+        while(1) delay(100);  // Fatal error
+    }
 
-  pinMode(TFT_BLK, OUTPUT);
-  digitalWrite(TFT_BLK, HIGH);
-  display.fillScreen(BLACK);
+    // Initialize display with faster speed
+    if (!display.begin(40000000)) {
+        Serial.println("Display initialization failed!");
+        while(1) delay(100);
+    }
 
-  // Start with gauge at neutral position (image 16)
-  current_gauge = 4;
-  target_gauge = 4;
-  drawGaugeImage(4); // Draw the neutral position first
+    pinMode(TFT_BLK, OUTPUT);
+    digitalWrite(TFT_BLK, HIGH);
+    display.fillScreen(BLACK);
 
-  setupTWAI();
+    // Initialize CAN before creating tasks
+    setupTWAI();
 
-  // Create tasks on separate cores
-  xTaskCreatePinnedToCore(
-      displayTaskFunction,
-      "displayTask",
-      10000,
-      NULL,
-      1,
-      &displayTask,
-      0
-  );
+    // Setup encoder
+    ESP32Encoder::useInternalWeakPullResistors = UP;
+    encoder.attachHalfQuad(ENCODER_CLK, ENCODER_DT);
+    encoder.setCount(0);
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-  xTaskCreatePinnedToCore(
-      canTaskFunction,
-      "canTask",
-      10000,
-      NULL,
-      2,
-      &canTask,
-      1
-  );
+    // Set initial gauge position
+    current_gauge = 4;
+    target_gauge = 4;
+    
+    // Draw initial gauge after all initialization
+    xSemaphoreTake(displayMutex, portMAX_DELAY);
+    drawGaugeImage(4);
+    xSemaphoreGive(displayMutex);
+
+    // Create tasks last
+    xTaskCreatePinnedToCore(
+        displayTaskFunction,
+        "displayTask",
+        8192,
+        NULL,
+        3,
+        &displayTask,
+        0
+    );
+
+    xTaskCreatePinnedToCore(
+        canTaskFunction,
+        "canTask",
+        4096,
+        NULL,
+        2,
+        &canTask,
+        1
+    );
 }
 
 void loop() {
-  vTaskDelay(1); // Keep watchdog happy
+    vTaskDelay(1); // Keep watchdog happy
 }
 
 

@@ -40,18 +40,20 @@ void setupTWAI() {
 void processCANMessage(twai_message_t *message) {
   if (message->identifier == MAP_CAN_ID) {
     uint16_t raw_map = (message->data[2] << 8) | message->data[3];
-    mapPressure = raw_map / 10.0; 
+    mapPressure = raw_map / 10.0;
+    
+    // Quick debug output
+    Serial.printf("CAN KPA: %.1f\n", mapPressure);
   }
 }
 
 void canTaskFunction(void *parameter) {
   while(1) {
     twai_message_t message;
-    esp_err_t result = twai_receive(&message, pdMS_TO_TICKS(0));
-    if (result == ESP_OK) {
+    if (twai_receive(&message, 0) == ESP_OK) {
       processCANMessage(&message);
     }
-    vTaskDelay(1); 
+    portYIELD(); // Allow other tasks to run
   }
 }
 
