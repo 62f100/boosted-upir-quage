@@ -2,6 +2,7 @@
 
 #include "display.h"
 #include "gauge_bw.h"
+#include "gauge_definitions.h"
 
 // Define display constants
 #define SCREEN_WIDTH 240 
@@ -9,13 +10,19 @@
 #define GAUGE_IMAGES 61 
 #define BUFFER_UPDATES 2      // Reduce buffer size
 #define GAUGE_UPDATE_MS 16    // ~60Hz updates
-#define SMOOTHING_FACTOR 0.6  // More responsive smoothing
 
 // Add new constants at top
 #define NEEDLE_WIDTH 20    // Width of needle area to update
 #define NEEDLE_HEIGHT 120  // Height of needle area
 #define NEEDLE_X (SCREEN_WIDTH/2 - NEEDLE_WIDTH/2)
 #define NEEDLE_Y (SCREEN_HEIGHT/2 - NEEDLE_HEIGHT/2)
+
+// Add at top with other defines
+#define CENTER_X (SCREEN_WIDTH / 2)
+#define CENTER_Y (SCREEN_HEIGHT / 2)
+#define HIGHLIGHT_WIDTH 3
+#define INNER_RADIUS 90
+#define OUTER_RADIUS 110
 
 // Variables
 float mapPressure = 0;
@@ -52,6 +59,11 @@ bool shouldUpdateGauge() {
 
 // Add debugging flag
 bool debug_drawing = true;
+
+// Add this function to convert encoder position to angle
+// float stepToAngle(int step) {
+//     return map(step, 0, TOTAL_STEPS, 240, -60); // Map steps to degrees (300 degree range)
+// }
 
 void drawGaugeImage(uint8_t gauge_number) {
     if (gauge_number >= GAUGE_IMAGES) {
@@ -206,39 +218,34 @@ void drawGaugeImage(uint8_t gauge_number) {
         return;
     }
 
-    if (last_gauge != gauge_number) {
-        Serial.printf("Drawing gauge %d (previous: %d)\n", gauge_number, last_gauge);
-        
-        if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            display.startWrite();
-            display.writeAddrWindow(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
-            display.writePixels((uint16_t*)gauge_image, SCREEN_WIDTH * SCREEN_HEIGHT);
-            display.endWrite();
-            xSemaphoreGive(displayMutex);
-            last_gauge = gauge_number;
-        } else {
-            Serial.println("Failed to take display mutex!");
+    display.startWrite();
+    display.writeAddrWindow(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+    display.writePixels((uint16_t*)gauge_image, SCREEN_WIDTH * SCREEN_HEIGHT);
+    display.endWrite();
+}
+
+// Add function to draw just the highlight
+void drawHighlightedHash(int position, uint16_t color) {
+    float angle = stepToAngle(position);
+    float radians = (angle - 90) * PI / 180.0;
+    
+    if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        for(int i = -HIGHLIGHT_WIDTH/2; i <= HIGHLIGHT_WIDTH/2; i++) {
+            float offset_radians = ((angle + i) - 90) * PI / 180.0;
+            int x1_offset = CENTER_X + (INNER_RADIUS * cos(offset_radians));
+            int y1_offset = CENTER_Y + (INNER_RADIUS * sin(offset_radians));
+            int x2_offset = CENTER_X + (OUTER_RADIUS * cos(offset_radians));
+            int y2_offset = CENTER_Y + (OUTER_RADIUS * sin(offset_radians));
+            display.drawLine(x1_offset, y1_offset, x2_offset, y2_offset, color);
         }
+        xSemaphoreGive(displayMutex);
     }
 }
 
 void updateGaugePosition(float pressure) {
-    pressureBuffer[bufferIndex] = pressure;
-    bufferIndex = (bufferIndex + 1) % BUFFER_UPDATES;
-
-    if(!shouldUpdateGauge()) return;
-
-    float smoothed = getSmoothedPressure();
-    float relative_pressure = smoothed - 99.705;
+    float relative_pressure = pressure - 106.50;
     float pressure_psi = relative_pressure * 0.145038;
 
-     // Round to the nearest 0.20
-    pressure_psi = round(pressure_psi / 0.20) * 0.20;
-
-    // Enhanced debugging output
-    Serial.print("Raw KPA: "); Serial.print(pressure);
-    //Serial.print(" PSI: "); Serial.println(pressure_psi);
-    
     int new_target;
     if(pressure_psi < -1) {
         new_target = 0;
@@ -248,22 +255,12 @@ void updateGaugePosition(float pressure) {
         new_target = map(pressure_psi * 100, -100, 1100, 0, GAUGE_IMAGES - 1);
     }
 
-    // Fast response for big changes, smooth for small changes
-    float change = abs(new_target - current_gauge);
-    if(change > 5) {
-        current_gauge = new_target; // Immediate jump for big changes
-    } else {
-        current_gauge += (new_target > current_gauge) ? 1 : -1;
-    }
-    
-    current_gauge = constrain(current_gauge, 0, GAUGE_IMAGES - 1);
+    current_gauge = constrain(new_target, 0, GAUGE_IMAGES - 1);
     drawGaugeImage(current_gauge);
 }
 
 // Optimize display task timing
 void displayTaskFunction(void *parameter) {
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    
     while(1) {
         if(mapPressure != lastMapPressure) {
             updateGaugePosition(mapPressure);
